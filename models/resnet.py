@@ -90,14 +90,7 @@ class ResNet(nn.Module):
         out = self.layer2(out)
         out = self.layer3(out)
         out = self.layer4(out)
-        if res == 'lr' and (dset == 'C10' or dset == 'C100'):
-            out = F.avg_pool2d(out, 1)
-        elif res == 'lr' and dset != 'C10' and dset != 'C100':    
-            out = F.avg_pool2d(out, 4)
-        elif res == 'hr' and (dset == 'C10' or dset == 'C100'):
-            out = F.avg_pool2d(out, 4)
-        elif res == 'hr' and dset != 'C10' and dset != 'C100':
-            out = F.avg_pool2d(out, 7)
+        out = F.adaptive_avg_pool2d(out, 1)
         out = out.view(out.size(0), -1)
         out = self.linear(out)
         return out
