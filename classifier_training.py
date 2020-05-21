@@ -8,7 +8,7 @@ How to run on different benchmarks:
        --img_size 32, 224, 8, 56
 """
 import os
-from tensorboard_logger import configure, log_value
+import argparse
 import torch
 import torch.autograd as autograd
 from torch.autograd import Variable
@@ -19,11 +19,12 @@ import numpy as np
 import tqdm
 import torch.optim as optim
 import torch.backends.cudnn as cudnn
+from torch.utils.tensorboard import SummaryWriter
 cudnn.benchmark = True
 
 from utils import utils
 
-import argparse
+
 parser = argparse.ArgumentParser(description='Classifier Training')
 parser.add_argument('--lr', type=float, default=1e-3, help='learning rate')
 parser.add_argument('--beta', type=float, default=1e-1, help='entropy multiplier')
@@ -42,17 +43,19 @@ parser.add_argument('--mode', default='hr', help='Type of the classifier - LR or
 args = parser.parse_args()
 
 if not os.path.exists(args.cv_dir):
-    os.system('mkdir ' + args.cv_dir)
+    os.makedirs(args.cv_dir)
 utils.save_args(__file__, args)
+device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+
 
 def train(epoch):
     rnet.train()
     matches, losses = [], []
     for batch_idx, (inputs, targets) in tqdm.tqdm(enumerate(trainloader), total=len(trainloader)):
 
-        inputs, targets = Variable(inputs), Variable(targets).cuda(async=True)
+        inputs, targets = inputs.to(device), targets.to(device)
         if not args.parallel:
-    	    inputs = inputs.cuda()
+            torch.cuda.synchronize()
 
         inputs = torch.nn.functional.interpolate(inputs, (args.img_size, args.img_size))
 
@@ -70,6 +73,10 @@ def train(epoch):
         matches.append(match.cpu())
         losses.append(loss.cpu())
 
+        # log loss
+        if batch_idx % 50 == 0:
+            writer.add_scalar('training loss', loss.cpu().item(), epoch * len(trainloader) + batch_idx)
+
     # Compute training indicators
     accuracy = torch.cat(matches, 0).float().mean()
     loss = torch.stack(losses).mean()
@@ -77,17 +84,18 @@ def train(epoch):
     # Save the logs
     log_str = 'E: %d | A: %.3f | L: %.3f'%(epoch, accuracy, loss)
     print(log_str)
-    log_value('train_accuracy', accuracy, epoch)
-    log_value('train_loss', loss, epoch)
+    writer.add_scalar('train_accuracy', accuracy, epoch)
+    # writer.add_scalar('train_loss', loss, epoch)
+
 
 def test(epoch):
     rnet.eval()
     matches = []
     for batch_idx, (inputs, targets) in tqdm.tqdm(enumerate(testloader), total=len(testloader)):
 
-        inputs, targets = Variable(inputs, volatile=True), Variable(targets).cuda(async=True)
+        inputs, targets = inputs.to(device), targets.to(device)
         if not args.parallel:
-            inputs = inputs.cuda()
+            torch.cuda.synchronize()
 
         inputs = torch.nn.functional.interpolate(inputs, (args.img_size, args.img_size))
 
@@ -102,7 +110,7 @@ def test(epoch):
     accuracy = torch.cat(matches, 0).float().mean()
     log_str = 'TS: %d | A: %.3f'%(epoch, accuracy)
     print(log_str)
-    log_value('train_accuracy', accuracy, epoch)
+    writer.add_scalar('train_accuracy', accuracy, epoch)
 
     # Save the model parameters
     rnet_state_dict = rnet.module.state_dict() if args.parallel else rnet.state_dict()
@@ -113,14 +121,15 @@ def test(epoch):
     }
     torch.save(state, args.cv_dir+'/ckpt_E_%d_A_%.3f'%(epoch, accuracy))
 
-#--------------------------------------------------------------------------------------------------------#
+
+# --------------------------------------------------------------------------------------------------------#
 trainset, testset = utils.get_dataset(args.model, args.data_dir)
 trainloader = torchdata.DataLoader(trainset, batch_size=args.batch_size, shuffle=True, num_workers=8)
 testloader = torchdata.DataLoader(testset, batch_size=args.batch_size, shuffle=False, num_workers=8)
 
 # Load the Model
 rnet, _, _ = utils.get_model(args.model)
-rnet.cuda()
+rnet.to(device)
 
 # Load the pre-trained classifier
 if args.load:
@@ -128,7 +137,7 @@ if args.load:
     rnet.load_state_dict(checkpoint['state_dict'])
 
 # Save the configuration to the output directory
-configure(args.cv_dir+'/log', flush_secs=5)
+writer = SummaryWriter(log_dir=args.cv_dir+'/log', flush_secs=5)
 
 # Define the optimizer
 if args.model.split('_')[1] == 'C10' or args.model.split('_')[1] == 'C100':
